@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate PWA Icons</title>
+  <style>
+    body { font-family: system-ui; padding: 20px; background: #09090b; color: white; }
+    canvas { border: 1px solid #333; margin: 10px; background: #18181b; }
+    button { padding: 10px 20px; background: #d946ef; color: white; border: none; border-radius: 6px; cursor: pointer; margin: 5px; }
+    button:hover { background: #c026d3; }
+  </style>
+</head>
+<body>
+  <h1>Generate PWA Icons</h1>
+  <p>Click "Generate All" to create all required icon sizes. Right-click each canvas to save as PNG.</p>
+  <button onclick="generateAll()">Generate All Icons</button>
+  <button onclick="downloadAll()">Download All as ZIP</button>
+  <div id="icons"></div>
+
+  <script>
+    const sizes = [72, 96, 128, 144, 152, 192, 384, 512];
+    
+    function drawIcon(ctx, size) {
+      const padding = size * 0.15;
+      const innerSize = size - padding * 2;
+      
+      // Background
+      ctx.fillStyle = '#09090b';
+      ctx.fillRect(0, 0, size, size);
+      
+      // Rounded rect background
+      ctx.beginPath();
+      const radius = size * 0.25;
+      ctx.roundRect(padding, padding, innerSize, innerSize, radius);
+      ctx.fillStyle = '#18181b';
+      ctx.fill();
+      
+      // Lines
+      ctx.strokeStyle = '#d946ef';
+      ctx.lineWidth = size * 0.08;
+      ctx.lineCap = 'round';
+      
+      const lineY = [size * 0.35, size * 0.5, size * 0.65];
+      const lineWidths = [1, 0.75, 0.5];
+      
+      lineY.forEach((y, i) => {
+        ctx.beginPath();
+        ctx.moveTo(padding + innerSize * 0.15, y);
+        ctx.lineTo(padding + innerSize * (0.15 + lineWidths[i]), y);
+        ctx.stroke();
+      });
+      
+      // Circle
+      ctx.beginPath();
+      ctx.arc(size * 0.75, size * 0.65, size * 0.12, 0, Math.PI * 2);
+      ctx.fillStyle = '#d946ef';
+      ctx.fill();
+    }
+    
+    function generateAll() {
+      const container = document.getElementById('icons');
+      container.innerHTML = '';
+      
+      sizes.forEach(size => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        drawIcon(ctx, size);
+        
+        const wrapper = document.createElement('div');
+        wrapper.style.display = 'inline-block';
+        wrapper.style.margin = '10px';
+        wrapper.innerHTML = `<p>${size}x${size}</p>`;
+        wrapper.appendChild(canvas);
+        
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL('image/png');
+        link.download = `icon-${size}.png`;
+        link.textContent = 'Download';
+        link.style.display = 'block';
+        link.style.marginTop = '5px';
+        wrapper.appendChild(link);
+        
+        container.appendChild(wrapper);
+      });
+    }
+    
+    async function downloadAll() {
+      const JSZip = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+      const zip = new JSZip.default();
+      
+      sizes.forEach(size => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        drawIcon(ctx, size);
+        
+        const dataUrl = canvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1];
+        zip.file(`icon-${size}.png`, base64, { base64: true });
+      });
+      
+      const content = await zip.generateAsync({ type: 'blob' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(content);
+      link.download = 'pwa-icons.zip';
+      link.click();
+    }
+  </script>
+</body>
+</html>
