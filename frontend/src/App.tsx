@@ -1,7 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './hooks/useAuth';
+import { AuthProvider } from './hooks/AuthProvider';
+import { useAuth } from './hooks/useAuth';
 import { Home } from './pages/Home';
 import { Optimizer } from './pages/Optimizer';
+import { Studio } from './pages/Studio';
 import { Wallpapers } from './pages/Wallpapers';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
@@ -42,6 +44,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/" element={<Home />} />
       <Route path="/optimizer" element={<Optimizer />} />
+      <Route path="/studio" element={<Studio />} />
       <Route path="/wallpapers" element={<Wallpapers />} />
       <Route path="/wallpapers/:slug" element={<WallpaperDetail />} />
       <Route path="/login" element={<Login />} />

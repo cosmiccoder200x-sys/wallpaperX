@@ -1,8 +1,26 @@
+"""Shared dataclasses and enums used by routes and services."""
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
 import enum
+
+from app.config import config
+
+MIME_TYPES = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+    "AVIF": "image/avif",
+}
+
+FILE_EXTENSIONS = {
+    "JPEG": "jpg",
+    "PNG": "png",
+    "WEBP": "webp",
+    "AVIF": "avif",
+}
 
 
 class PlanType(str, enum.Enum):
@@ -16,6 +34,14 @@ class ImageFormat(str, enum.Enum):
     PNG = "PNG"
     WEBP = "WEBP"
     AVIF = "AVIF"
+
+    @property
+    def mime_type(self) -> str:
+        return MIME_TYPES[self.value]
+
+    @property
+    def extension(self) -> str:
+        return FILE_EXTENSIONS[self.value]
 
 
 @dataclass
@@ -38,6 +64,11 @@ class User:
     @property
     def is_admin(self) -> bool:
         return self.plan == PlanType.ADMIN
+
+    @property
+    def is_anonymous(self) -> bool:
+        # Anonymous identities are never persisted; see services.auth.
+        return self.email.endswith("@anonymous.local")
 
 
 @dataclass
@@ -68,11 +99,11 @@ class Wallpaper:
     def resolution_label(self) -> str:
         if self.width >= 7680:
             return "8K"
-        elif self.width >= 3840:
+        if self.width >= 3840:
             return "4K"
-        elif self.width >= 2560:
+        if self.width >= 2560:
             return "2K"
-        elif self.width >= 1920:
+        if self.width >= 1920:
             return "1080p"
         return f"{self.width}x{self.height}"
 
@@ -98,7 +129,7 @@ class Optimization:
     @property
     def compression_ratio(self) -> float:
         if self.original_size == 0:
-            return 0
+            return 0.0
         return (self.original_size - self.output_size) / self.original_size * 100
 
     @property
@@ -125,6 +156,8 @@ class OptimizationResult:
     output_format: Optional[ImageFormat] = None
     quality_used: Optional[int] = None
     processing_time_ms: int = 0
+    target_met: bool = False
+    message: Optional[str] = None
     error: Optional[str] = None
     error_code: Optional[str] = None
 
@@ -154,21 +187,24 @@ class PlanLimits:
     history_retention_days: int = 30
 
 
+# Plan limits are configuration, not code: operators tune them through the
+# documented FREE_* / PRO_* environment variables. The defaults here and in
+# app.config.settings are the same, so behaviour is unchanged out of the box.
 FREE_LIMITS = PlanLimits(
-    max_input_mb=25,
-    max_output_mb=10,
-    daily_optimizations=5,
-    history_retention_days=7
+    max_input_mb=config.FREE_MAX_INPUT_MB,
+    max_output_mb=config.FREE_MAX_OUTPUT_MB,
+    daily_optimizations=config.FREE_DAILY_OPTIMIZATIONS,
+    history_retention_days=7,
 )
 
 PRO_LIMITS = PlanLimits(
-    max_input_mb=100,
-    max_output_mb=50,
-    daily_optimizations=-1,  # unlimited
+    max_input_mb=config.PRO_MAX_INPUT_MB,
+    max_output_mb=config.PRO_MAX_OUTPUT_MB,
+    daily_optimizations=-1,
     priority_processing=True,
     batch_processing=True,
     no_ads=True,
-    history_retention_days=365
+    history_retention_days=365,
 )
 
 ADMIN_LIMITS = PlanLimits(
@@ -178,7 +214,7 @@ ADMIN_LIMITS = PlanLimits(
     priority_processing=True,
     batch_processing=True,
     no_ads=True,
-    history_retention_days=-1
+    history_retention_days=-1,
 )
 
 PLAN_LIMITS = {

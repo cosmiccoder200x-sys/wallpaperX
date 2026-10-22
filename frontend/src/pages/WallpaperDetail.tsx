@@ -16,10 +16,12 @@ export function WallpaperDetail() {
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [related, setRelated] = useState<Wallpaper[]>([]);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!slug) return;
     
+    let cancelled = false;
     const fetchWallpaper = async () => {
       setLoading(true);
       setError(null);
@@ -29,38 +31,80 @@ export function WallpaperDetail() {
           wallpapersApi.get(slug),
           wallpapersApi.list({ limit: 8, published: true }),
         ]);
+        if (cancelled) return;
         
-        setWallpaper(detailRes.data.data);
+        const detail = detailRes.data.data ?? null;
+        setWallpaper(detail);
         const relatedData = relatedRes.data.data || [];
-        setRelated(relatedData.filter(w => w.id !== detailRes.data.data?.id).slice(0, 4));
+        setRelated(relatedData.filter((w) => w.id !== detail?.id).slice(0, 4));
       } catch (err) {
-        setError(handleApiError(err).message);
+        if (!cancelled) setError(handleApiError(err).message);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     
-    fetchWallpaper();
+    void fetchWallpaper();
+    return () => {
+      cancelled = true;
+    };
   }, [slug]);
+
+  // SEO metadata
+  useEffect(() => {
+    if (!wallpaper) return;
+    document.title = `${wallpaper.title} | Wallpaper10`;
+    
+    const metaTags = [
+      { property: 'og:title', content: wallpaper.title },
+      { property: 'og:description', content: `${wallpaper.width}×${wallpaper.height} • ${formatBytes(wallpaper.file_size)} • ${wallpaper.format}` },
+      { property: 'og:image', content: wallpaper.image_url },
+      { property: 'og:type', content: 'website' },
+      { property: 'og:url', content: window.location.href },
+      { name: 'twitter:card', content: 'summary_large_image' },
+      { name: 'twitter:title', content: wallpaper.title },
+      { name: 'twitter:description', content: `${wallpaper.width}×${wallpaper.height} • ${formatBytes(wallpaper.file_size)}` },
+      { name: 'twitter:image', content: wallpaper.image_url },
+    ];
+    
+    metaTags.forEach(({ property, name, content }) => {
+      const selector = property ? `meta[property="${property}"]` : `meta[name="${name}"]`;
+      let tag = document.querySelector(selector) as HTMLMetaElement;
+      if (!tag) {
+        tag = document.createElement('meta');
+        if (property) tag.setAttribute('property', property);
+        if (name) tag.setAttribute('name', name);
+        document.head.appendChild(tag);
+      }
+      tag.setAttribute('content', content);
+    });
+    
+    // Cleanup on unmount
+    return () => {
+      document.title = 'Wallpaper10 — Any wallpaper. Perfect size.';
+    };
+  }, [wallpaper]);
 
   const handleDownload = async () => {
     if (!wallpaper || downloading) return;
     setDownloading(true);
+    setDownloadError(null);
     
     try {
       const response = await wallpapersApi.download(wallpaper.id);
       const downloadData = response.data.data;
-      if (!downloadData) throw new Error('Download failed');
+      if (!downloadData?.download_url) throw new Error('Download failed');
       const { download_url, filename } = downloadData;
       
       const a = document.createElement('a');
       a.href = download_url;
       a.download = filename;
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      console.error('Download failed:', err);
+      setDownloadError(handleApiError(err).message);
     } finally {
       setDownloading(false);
     }
@@ -110,39 +154,6 @@ export function WallpaperDetail() {
     );
   }
 
-  // SEO metadata
-  useEffect(() => {
-    document.title = `${wallpaper.title} | Wallpaper10`;
-    
-    const metaTags = [
-      { property: 'og:title', content: wallpaper.title },
-      { property: 'og:description', content: `${wallpaper.width}×${wallpaper.height} • ${formatBytes(wallpaper.file_size)} • ${wallpaper.format}` },
-      { property: 'og:image', content: wallpaper.image_url },
-      { property: 'og:type', content: 'website' },
-      { property: 'og:url', content: window.location.href },
-      { name: 'twitter:card', content: 'summary_large_image' },
-      { name: 'twitter:title', content: wallpaper.title },
-      { name: 'twitter:description', content: `${wallpaper.width}×${wallpaper.height} • ${formatBytes(wallpaper.file_size)}` },
-      { name: 'twitter:image', content: wallpaper.image_url },
-    ];
-    
-    metaTags.forEach(({ property, name, content }) => {
-      const selector = property ? `meta[property="${property}"]` : `meta[name="${name}"]`;
-      let tag = document.querySelector(selector) as HTMLMetaElement;
-      if (!tag) {
-        tag = document.createElement('meta');
-        if (property) tag.setAttribute('property', property);
-        if (name) tag.setAttribute('name', name);
-        document.head.appendChild(tag);
-      }
-      tag.setAttribute('content', content);
-    });
-    
-    // Cleanup on unmount
-    return () => {
-      document.title = 'Wallpaper10 — Any wallpaper. Perfect size.';
-    };
-  }, [wallpaper]);
 
   return (
     <div className="min-h-screen bg-brand-950">
@@ -186,6 +197,13 @@ export function WallpaperDetail() {
               <Badge variant="outline">{wallpaper.category}</Badge>
               <Badge variant="outline">{wallpaper.aspect_ratio}</Badge>
             </div>
+
+            {downloadError && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm" role="alert">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{downloadError}</span>
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-4 pt-4 border-t border-brand-800">
               <Button onClick={handleDownload} loading={downloading} className="flex-1 sm:flex-none" style={{ 

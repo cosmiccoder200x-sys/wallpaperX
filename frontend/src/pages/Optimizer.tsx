@@ -1,222 +1,415 @@
-import { useState, useCallback, useEffect } from 'react';
-import { AlertCircle, CheckCircle } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import axios from 'axios';
+import { AlertCircle, Info, Sparkles, X } from 'lucide-react';
 import { UploadArea } from '../components/optimizer/UploadArea';
 import { UrlInput } from '../components/optimizer/UrlInput';
 import { OptimizationControls } from '../components/optimizer/OptimizationControls';
 import { Comparison } from '../components/optimizer/Comparison';
-import { optimizeApi } from '../services/api';
-import { handleApiError } from '../services/api';
-import { cn } from '../utils/cn';
-import type { ImageAnalysis, ImageFormat, OptimizationResult } from '../types';
+import { optimizeApi, handleApiError } from '../services/api';
+import { formatBytes } from '../utils/format';
+import { Button } from '../components/ui/Button';
+import { Badge } from '../components/ui/Badge';
+import type {
+  ImageAnalysis,
+  ImageFormat,
+  OptimizationResult,
+  OutputFormat,
+  PlanLimits,
+} from '../types';
 
-const RESOLUTION_PRESETS: Record<string, { width: number; height: number } | null> = {
-  original: null,
+const MB = 1024 * 1024;
+
+const RESOLUTION_PRESETS: Record<string, { width: number; height: number } | undefined> = {
   '4k': { width: 3840, height: 2160 },
   '2k': { width: 2560, height: 1440 },
   '1080p': { width: 1920, height: 1080 },
-  custom: null,
 };
 
+const DEFAULT_LIMITS: PlanLimits = {
+  plan: 'free',
+  max_input_mb: 25,
+  max_output_mb: 10,
+  daily_optimizations: 5,
+  daily_used: 0,
+  daily_remaining: 5,
+  priority_processing: false,
+  batch_processing: false,
+  no_ads: false,
+  history_retention_days: 7,
+};
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+function analysisFromResult(result: OptimizationResult): ImageAnalysis {
+  const divisor = gcd(result.original_width, result.original_height) || 1;
+  return {
+    filename: result.filename,
+    format: result.original_format,
+    mime_type: result.mimeType,
+    size: result.original_size,
+    size_formatted: formatBytes(result.original_size),
+    width: result.original_width,
+    height: result.original_height,
+    dimensions: `${result.original_width} × ${result.original_height}`,
+    aspect_ratio: `${result.original_width / divisor}:${result.original_height / divisor}`,
+    megapixels: (result.original_width * result.original_height) / 1_000_000,
+    has_transparency: false,
+    mode: 'unknown',
+    estimated_optimization: {
+      recommended_format: result.output_format,
+      estimated_size_mb: result.output_size / MB,
+      estimated_compression_pct: result.compression_ratio,
+      can_reach_1mb: result.target_met && result.target_size <= MB,
+      can_reach_5mb: result.target_met && result.target_size <= 5 * MB,
+      can_reach_10mb: result.target_met && result.target_size <= 10 * MB,
+    },
+  };
+}
+
 export function Optimizer() {
+  const [mode, setMode] = useState<'upload' | 'url'>('upload');
+
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [optimized, setOptimized] = useState<OptimizationResult | null>(null);
-  const [urlAnalysis, setUrlAnalysis] = useState<any>(null);
-  const [urlOptimized, setUrlOptimized] = useState<OptimizationResult | null>(null);
-  
+  const [optimizedUrl, setOptimizedUrl] = useState<string | null>(null);
+  const [urlSource, setUrlSource] = useState<string | null>(null);
+  const [urlAnalysis, setUrlAnalysis] = useState<ImageAnalysis | null>(null);
+
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isUrlLoading, setIsUrlLoading] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  
-  const [targetSize, setTargetSize] = useState(10 * 1024 * 1024);
-  const [outputFormat, setOutputFormat] = useState<ImageFormat>('AUTO');
-  const [targetResolution, setTargetResolution] = useState('original');
-  const [customWidth, _setCustomWidth] = useState('');
-  const [customHeight, _setCustomHeight] = useState('');
-  
   const [error, setError] = useState<string | null>(null);
-  const [planLimits, setPlanLimits] = useState({ max_output_mb: 10, daily_remaining: 5 });
-  
-  const activeTab = analysis ? 'upload' : urlAnalysis ? 'url' : 'upload';
 
+  const [targetSize, setTargetSize] = useState(10 * MB);
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>('AUTO');
+  const [targetResolution, setTargetResolution] = useState('original');
+  const [customWidth, setCustomWidth] = useState('');
+  const [customHeight, setCustomHeight] = useState('');
+  const [planLimits, setPlanLimits] = useState<PlanLimits>(DEFAULT_LIMITS);
+
+  const analyzeAbort = useRef<AbortController | null>(null);
+  const optimizeAbort = useRef<AbortController | null>(null);
+  const analyzeSeq = useRef(0);
+  const optimizeSeq = useRef(0);
+
+  // Preview of the real selected file; revoked whenever the file changes.
   useEffect(() => {
-    loadLimits();
-  }, []);
-
-  const loadLimits = async () => {
-    try {
-      const response = await optimizeApi.limits();
-      setPlanLimits(response.data.data);
-    } catch {
-      // Use defaults
+    if (!selectedFile) {
+      setPreviewUrl(null);
+      return;
     }
-  };
+    const url = URL.createObjectURL(selectedFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [selectedFile]);
 
-  const handleFileSelect = useCallback((_file: File) => {
-    setError(null);
-    setAnalysis(null);
+  // Preview of the optimized blob; revoked whenever the result changes.
+  useEffect(() => {
+    if (!optimized) {
+      setOptimizedUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(optimized.blob);
+    setOptimizedUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [optimized]);
+
+  // A result is only valid for the settings that produced it.
+  useEffect(() => {
     setOptimized(null);
-    setUrlAnalysis(null);
-    setUrlOptimized(null);
-  }, []);
-
-  const handleAnalyze = useCallback(async (file: File) => {
-    setIsAnalyzing(true);
-    setError(null);
-    
-    try {
-      const response = await optimizeApi.analyze(file);
-      setAnalysis(response.data.data);
-    } catch (err) {
-      const apiError = handleApiError(err);
-      setError(apiError.message);
-      setAnalysis(null);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, []);
-
-  const handleUrlOptimize = useCallback(async (url: string) => {
-    setIsUrlLoading(true);
-    setError(null);
-    
-    try {
-      const response = await optimizeApi.optimizeUrl(url, {
-        target_size_mb: targetSize / 1024 / 1024,
-        output_format: outputFormat === 'AUTO' ? undefined : outputFormat,
-        target_width: targetResolution !== 'original' && targetResolution !== 'custom' 
-          ? RESOLUTION_PRESETS[targetResolution]?.width 
-          : customWidth ? parseInt(customWidth) : undefined,
-        target_height: targetResolution !== 'original' && targetResolution !== 'custom' 
-          ? RESOLUTION_PRESETS[targetResolution]?.height 
-          : customHeight ? parseInt(customHeight) : undefined,
-      });
-      
-      const blob = response.data;
-      const result: OptimizationResult = {
-        success: true,
-        output_size: blob.size,
-        output_width: 0,
-        output_height: 0,
-        output_format: outputFormat === 'AUTO' ? 'WEBP' : outputFormat,
-        quality_used: 85,
-        processing_time_ms: 0,
-        compression_ratio: 0,
-        saved_bytes: 0,
-        blob,
-      };
-      
-      setUrlOptimized(result);
-      setUrlAnalysis({ filename: url.split('/').pop() || 'image.jpg', size: blob.size });
-    } catch (err) {
-      const apiError = handleApiError(err);
-      setError(apiError.message);
-    } finally {
-      setIsUrlLoading(false);
-    }
   }, [targetSize, outputFormat, targetResolution, customWidth, customHeight]);
 
+  useEffect(() => {
+    let cancelled = false;
+    optimizeApi
+      .limits()
+      .then((response) => {
+        if (cancelled) return;
+        const data = response.data.data;
+        if (data) setPlanLimits({ ...DEFAULT_LIMITS, ...data });
+      })
+      .catch(() => {
+        /* keep safe defaults; the optimizer still works anonymously */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      analyzeAbort.current?.abort();
+      optimizeAbort.current?.abort();
+    };
+  }, []);
+
+  const cancelRequests = useCallback(() => {
+    analyzeAbort.current?.abort();
+    optimizeAbort.current?.abort();
+    analyzeSeq.current += 1;
+    optimizeSeq.current += 1;
+    setIsAnalyzing(false);
+    setIsOptimizing(false);
+    setIsUrlLoading(false);
+  }, []);
+
+  const analyzeFile = useCallback(async (file: File) => {
+    const seq = analyzeSeq.current + 1;
+    analyzeSeq.current = seq;
+    analyzeAbort.current?.abort();
+    const controller = new AbortController();
+    analyzeAbort.current = controller;
+
+    setIsAnalyzing(true);
+    setError(null);
+
+    try {
+      const response = await optimizeApi.analyze(file, controller.signal);
+      if (seq !== analyzeSeq.current) return;
+      const data = response.data.data;
+      if (!data) throw new Error('The server did not return image details');
+      setAnalysis(data);
+    } catch (err) {
+      if (axios.isCancel(err) || seq !== analyzeSeq.current) return;
+      setAnalysis(null);
+      setError(handleApiError(err).message);
+    } finally {
+      if (seq === analyzeSeq.current) {
+        setIsAnalyzing(false);
+      }
+    }
+  }, []);
+
+  const handleFileSelect = useCallback(
+    (file: File) => {
+      cancelRequests();
+      setMode('upload');
+      setSelectedFile(file);
+      setAnalysis(null);
+      setOptimized(null);
+      setUrlSource(null);
+      setUrlAnalysis(null);
+      setError(null);
+      void analyzeFile(file);
+    },
+    [analyzeFile, cancelRequests]
+  );
+
+  const handleValidationError = useCallback((message: string) => {
+    setError(message);
+  }, []);
+
+  const clearFile = useCallback(() => {
+    cancelRequests();
+    setSelectedFile(null);
+    setAnalysis(null);
+    setOptimized(null);
+    setError(null);
+  }, [cancelRequests]);
+
+  const switchMode = useCallback(
+    (next: 'upload' | 'url') => {
+      if (next === mode) return;
+      cancelRequests();
+      setMode(next);
+      setError(null);
+      setOptimized(null);
+      if (next === 'upload') {
+        setUrlSource(null);
+        setUrlAnalysis(null);
+      } else {
+        setSelectedFile(null);
+        setAnalysis(null);
+      }
+    },
+    [cancelRequests, mode]
+  );
+
+  const resolutionBounds = useCallback((): { targetWidth?: number; targetHeight?: number } => {
+    if (targetResolution === 'original') return {};
+    if (targetResolution === 'custom') {
+      const width = Number(customWidth);
+      const height = Number(customHeight);
+      return {
+        targetWidth: Number.isFinite(width) && width > 0 ? width : undefined,
+        targetHeight: Number.isFinite(height) && height > 0 ? height : undefined,
+      };
+    }
+    const preset = RESOLUTION_PRESETS[targetResolution];
+    return preset ? { targetWidth: preset.width, targetHeight: preset.height } : {};
+  }, [customHeight, customWidth, targetResolution]);
+
+  const validateSettings = useCallback((): string | null => {
+    if (targetSize < 1024) return 'Choose a target size of at least 1 KB.';
+    if (targetSize > planLimits.max_output_mb * MB) {
+      return `Your plan allows a maximum output of ${planLimits.max_output_mb} MB.`;
+    }
+    if (targetResolution === 'custom') {
+      const width = Number(customWidth);
+      const height = Number(customHeight);
+      const hasWidth = customWidth.trim() !== '';
+      const hasHeight = customHeight.trim() !== '';
+      if (!hasWidth && !hasHeight) {
+        return 'Enter a maximum width, a maximum height, or both.';
+      }
+      for (const [label, raw, present] of [
+        ['width', width, hasWidth],
+        ['height', height, hasHeight],
+      ] as const) {
+        if (present && (!Number.isFinite(raw) || raw < 16 || raw > 16384)) {
+          return `Custom ${label} must be between 16 and 16384 pixels.`;
+        }
+      }
+    }
+    return null;
+  }, [customHeight, customWidth, planLimits.max_output_mb, targetResolution, targetSize]);
+
   const handleOptimize = useCallback(async () => {
-    if (!analysis) return;
-    
+    if (!selectedFile || !analysis || isOptimizing || isAnalyzing) return;
+
+    const settingsError = validateSettings();
+    if (settingsError) {
+      setError(settingsError);
+      return;
+    }
+
+    const seq = optimizeSeq.current + 1;
+    optimizeSeq.current = seq;
+    optimizeAbort.current?.abort();
+    const controller = new AbortController();
+    optimizeAbort.current = controller;
+
     setIsOptimizing(true);
     setError(null);
-    
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    const file = fileInput?.files?.[0];
-    if (!file) return;
-
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('target_size_mb', (targetSize / 1024 / 1024).toString());
-    if (outputFormat !== 'AUTO') formData.append('output_format', outputFormat);
-    
-    const resolution = RESOLUTION_PRESETS[targetResolution];
-    if (resolution) {
-      formData.append('target_width', resolution.width.toString());
-      formData.append('target_height', resolution.height.toString());
-    } else if (targetResolution === 'custom') {
-      if (customWidth) formData.append('target_width', customWidth);
-      if (customHeight) formData.append('target_height', customHeight);
-    }
+    setOptimized(null);
 
     try {
-      const response = await optimizeApi.optimize(file, {
-        target_size_mb: targetSize / 1024 / 1024,
-        output_format: outputFormat === 'AUTO' ? undefined : outputFormat,
-        target_width: resolution?.width || (customWidth ? parseInt(customWidth) : undefined),
-        target_height: resolution?.height || (customHeight ? parseInt(customHeight) : undefined),
-      });
-      
-      const blob = response.data;
-      const result: OptimizationResult = {
-        success: true,
-        output_size: blob.size,
-        output_width: 0,
-        output_height: 0,
-        output_format: outputFormat === 'AUTO' ? 'WEBP' : outputFormat,
-        quality_used: 85,
-        processing_time_ms: 0,
-        compression_ratio: 0,
-        saved_bytes: 0,
-        blob,
-      };
-      
+      const result = await optimizeApi.optimize(
+        selectedFile,
+        {
+          targetSizeBytes: targetSize,
+          outputFormat,
+          ...resolutionBounds(),
+        },
+        controller.signal
+      );
+      if (seq !== optimizeSeq.current) return;
       setOptimized(result);
+      setPlanLimits((current) => ({
+        ...current,
+        daily_remaining:
+          current.daily_remaining > 0 ? current.daily_remaining - 1 : current.daily_remaining,
+      }));
     } catch (err) {
-      const apiError = handleApiError(err);
-      setError(apiError.message);
+      if (axios.isCancel(err) || seq !== optimizeSeq.current) return;
+      setError(handleApiError(err).message);
     } finally {
-      setIsOptimizing(false);
-    }
-  }, [analysis, targetSize, outputFormat, targetResolution, customWidth, customHeight]);
-
-  const handleDownload = useCallback(async () => {
-    const result = optimized || urlOptimized;
-    if (!result) return;
-    
-    setIsDownloading(true);
-    
-    try {
-      let blob: Blob;
-      if (result.blob) {
-        blob = result.blob;
-      } else {
-        const response = await fetch(URL.createObjectURL(result as any));
-        blob = await response.blob();
+      if (seq === optimizeSeq.current) {
+        setIsOptimizing(false);
       }
-      
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `x-optimized.${(result.output_format || 'webp').toLowerCase()}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('Download failed:', err);
+    }
+  }, [
+    analysis,
+    isAnalyzing,
+    isOptimizing,
+    outputFormat,
+    resolutionBounds,
+    selectedFile,
+    targetSize,
+    validateSettings,
+  ]);
+
+  const handleUrlOptimize = useCallback(
+    async (url: string) => {
+      const settingsError = validateSettings();
+      if (settingsError) {
+        setError(settingsError);
+        return;
+      }
+
+      const seq = optimizeSeq.current + 1;
+      optimizeSeq.current = seq;
+      optimizeAbort.current?.abort();
+      const controller = new AbortController();
+      optimizeAbort.current = controller;
+
+      setIsUrlLoading(true);
+      setError(null);
+      setOptimized(null);
+
+      try {
+        const result = await optimizeApi.optimizeUrl(
+          url,
+          {
+            targetSizeBytes: targetSize,
+            outputFormat,
+            ...resolutionBounds(),
+          },
+          controller.signal
+        );
+        if (seq !== optimizeSeq.current) return;
+        setUrlSource(url);
+        setUrlAnalysis(analysisFromResult(result));
+        setOptimized(result);
+        setPlanLimits((current) => ({
+          ...current,
+          daily_remaining:
+            current.daily_remaining > 0 ? current.daily_remaining - 1 : current.daily_remaining,
+        }));
+      } catch (err) {
+        if (axios.isCancel(err) || seq !== optimizeSeq.current) return;
+        setError(handleApiError(err).message);
+      } finally {
+        if (seq === optimizeSeq.current) {
+          setIsUrlLoading(false);
+        }
+      }
+    },
+    [outputFormat, resolutionBounds, targetSize, validateSettings]
+  );
+
+  const clearUrl = useCallback(() => {
+    cancelRequests();
+    setUrlSource(null);
+    setUrlAnalysis(null);
+    setOptimized(null);
+    setError(null);
+  }, [cancelRequests]);
+
+  const handleDownload = useCallback(() => {
+    if (!optimized) return;
+    setIsDownloading(true);
+    try {
+      const url = optimizedUrl ?? URL.createObjectURL(optimized.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = optimized.filename;
+      link.rel = 'noopener';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      if (!optimizedUrl) {
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    } catch {
+      setError('The download could not be prepared. Please try again.');
     } finally {
       setIsDownloading(false);
     }
-  }, [optimized, urlOptimized]);
+  }, [optimized, optimizedUrl]);
 
-  const clearFile = useCallback(() => {
-    setAnalysis(null);
-    setOptimized(null);
-    setError(null);
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    if (fileInput) fileInput.value = '';
-  }, []);
-
-  const clearUrl = useCallback(() => {
-    setUrlAnalysis(null);
-    setUrlOptimized(null);
-  }, []);
-
-  const currentAnalysis = analysis || urlAnalysis;
-  const currentOptimized = optimized || urlOptimized;
-  const currentIsOptimizing = isOptimizing || isUrlLoading;
+  const originalAnalysis = analysis ?? urlAnalysis;
+  const optimizeInProgress = isOptimizing || isUrlLoading;
+  const formatOptions = useMemo<ImageFormat[]>(
+    () => ['JPEG', 'PNG', 'WEBP', 'AVIF'],
+    []
+  );
 
   return (
     <div className="min-h-screen bg-brand-950">
@@ -224,18 +417,31 @@ export function Optimizer() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-8">
-              <a href="/" className="flex items-center gap-2">
-                <span className="text-2xl font-bold text-white tracking-tight">WALLPAPER10</span>
-              </a>
+              <Link to="/" className="flex items-center gap-2">
+                <span className="text-2xl font-bold text-white tracking-tight">WALLPAPERX</span>
+              </Link>
               <nav className="hidden md:flex items-center gap-6">
-                <a href="/" className="text-sm text-brand-400 hover:text-white transition-colors">Home</a>
-                <a href="/optimizer" className="text-sm text-accent-400 font-medium">Optimize</a>
-                <a href="/wallpapers" className="text-sm text-brand-400 hover:text-white transition-colors">Library</a>
+                <Link to="/" className="text-sm text-brand-400 hover:text-white transition-colors">
+                  Home
+                </Link>
+                <Link to="/optimizer" className="text-sm text-accent-400 font-medium">
+                  Optimize
+                </Link>
+                <Link to="/wallpapers" className="text-sm text-brand-400 hover:text-white transition-colors">
+                  Library
+                </Link>
+                <Link to="/studio" className="text-sm text-brand-400 hover:text-white transition-colors">
+                  Studio
+                </Link>
               </nav>
             </div>
             <div className="flex items-center gap-3">
-              <a href="/login" className="text-sm text-brand-300 hover:text-white transition-colors">Sign in</a>
-              <a href="/register" className="btn-primary text-sm">Get Started</a>
+              <Link to="/login" className="text-sm text-brand-300 hover:text-white transition-colors">
+                Sign in
+              </Link>
+              <Link to="/register" className="text-sm text-brand-300 hover:text-white transition-colors">
+                Get Started
+              </Link>
             </div>
           </div>
         </div>
@@ -243,67 +449,100 @@ export function Optimizer() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="grid lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-7 space-y-6">
-            <div className="space-y-4">
-              <h1 className="text-3xl sm:text-4xl font-bold text-white tracking-tight">
+          <section className="lg:col-span-8 space-y-6">
+            <div className="space-y-3">
+              <h1 className="text-3xl sm:text-4xl font-bold text-white tracking-tight flex items-center gap-2">
+                <Sparkles className="w-7 h-7 text-accent-400" />
                 Optimize Your Wallpaper
               </h1>
               <p className="text-brand-400 text-lg">
-                Upload an image or paste a URL. We'll compress it to your target size
-                while preserving maximum visual quality.
+                Upload an image or paste a URL. We compress it to your target size while keeping the
+                highest quality that fits.
               </p>
             </div>
 
-            <div className="card card-hover">
-              <div className="p-6">
-                <div className="flex gap-4 mb-6 border-b border-brand-800">
-                  <button
-                    onClick={() => {}}
-                    className={cn(
-                      'px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors',
-                      activeTab === 'upload'
-                        ? 'border-accent-500 text-white'
-                        : 'border-transparent text-brand-400 hover:text-brand-200'
-                    )}
-                  >
-                    Upload File
-                  </button>
-                  <button
-                    onClick={() => {}}
-                    className={cn(
-                      'px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors',
-                      activeTab === 'url'
-                        ? 'border-accent-500 text-white'
-                        : 'border-transparent text-brand-400 hover:text-brand-200'
-                    )}
-                  >
-                    From URL
-                  </button>
+            {error && (
+              <div
+                className="flex items-start gap-3 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-200"
+                role="alert"
+              >
+                <AlertCircle className="w-5 h-5 mt-0.5 shrink-0" />
+                <div className="flex-1 text-sm">
+                  <p className="font-medium">Something went wrong</p>
+                  <p className="opacity-90 mt-0.5">{error}</p>
                 </div>
-
-                {activeTab === 'upload' ? (
-                  <UploadArea
-                    onFileSelect={handleFileSelect}
-                    onAnalyze={handleAnalyze}
-                    analysis={analysis}
-                    isAnalyzing={isAnalyzing}
-                    isOptimizing={currentIsOptimizing}
-                    maxSizeMB={planLimits.max_output_mb * 5}
-                    clearFile={clearFile}
-                  />
-                ) : (
-                  <UrlInput
-                    onOptimize={handleUrlOptimize}
-                    isLoading={isUrlLoading}
-                    analysis={urlAnalysis}
-                    clearUrl={clearUrl}
-                  />
-                )}
+                <button
+                  type="button"
+                  onClick={() => setError(null)}
+                  className="text-red-300 hover:text-white"
+                  aria-label="Dismiss error"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-            </div>
+            )}
 
-            {analysis && !currentOptimized && (
-              <div className="card card-hover">
+            {!optimized && (
+              <div className="card">
+                <div className="p-6 space-y-6">
+                  <div className="flex gap-2 border-b border-brand-800 pb-2" role="tablist">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === 'upload'}
+                      onClick={() => switchMode('upload')}
+                      className={
+                        mode === 'upload'
+                          ? 'px-3 py-1.5 rounded-lg text-sm font-medium bg-accent-600 text-white'
+                          : 'px-3 py-1.5 rounded-lg text-sm font-medium text-brand-400 hover:text-white'
+                      }
+                    >
+                      Upload File
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === 'url'}
+                      onClick={() => switchMode('url')}
+                      className={
+                        mode === 'url'
+                          ? 'px-3 py-1.5 rounded-lg text-sm font-medium bg-accent-600 text-white'
+                          : 'px-3 py-1.5 rounded-lg text-sm font-medium text-brand-400 hover:text-white'
+                      }
+                    >
+                      From URL
+                    </button>
+                  </div>
+
+                  {mode === 'upload' ? (
+                    <UploadArea
+                      selectedFile={selectedFile}
+                      previewUrl={previewUrl}
+                      analysis={analysis}
+                      isAnalyzing={isAnalyzing}
+                      isOptimizing={isOptimizing}
+                      maxSizeMB={planLimits.max_input_mb}
+                      error={null}
+                      onFileSelect={handleFileSelect}
+                      onValidationError={handleValidationError}
+                      onClear={clearFile}
+                    />
+                  ) : (
+                    <UrlInput
+                      onOptimize={handleUrlOptimize}
+                      isLoading={isUrlLoading}
+                      sourceUrl={urlSource}
+                      clearUrl={clearUrl}
+                      disabled={isOptimizing}
+                      maxSizeMB={planLimits.max_input_mb}
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
+            {!optimized && (mode === 'url' || analysis) && (
+              <div className="card">
                 <div className="p-6">
                   <OptimizationControls
                     analysis={analysis}
@@ -313,168 +552,97 @@ export function Optimizer() {
                     onOutputFormatChange={setOutputFormat}
                     targetResolution={targetResolution}
                     onTargetResolutionChange={setTargetResolution}
-                    isOptimizing={currentIsOptimizing}
+                    customWidth={customWidth}
+                    customHeight={customHeight}
+                    onCustomWidthChange={setCustomWidth}
+                    onCustomHeightChange={setCustomHeight}
+                    isOptimizing={optimizeInProgress}
                     onOptimize={handleOptimize}
-                    planLimits={planLimits}
+                    planLimits={{
+                      max_output_mb: planLimits.max_output_mb,
+                      daily_remaining: planLimits.daily_remaining,
+                    }}
+                    showOptimizeButton={mode === 'upload'}
                   />
                 </div>
               </div>
             )}
 
-            {error && (
-              <div className="card border-red-500/30 bg-red-500/10">
-                <div className="p-4 flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
-                  <p className="text-red-300">{error}</p>
+            {optimized && originalAnalysis && (
+              <div className="card">
+                <div className="p-6 space-y-6">
+                  <Comparison
+                    original={originalAnalysis}
+                    optimized={optimized}
+                    originalUrl={mode === 'url' ? urlSource : previewUrl}
+                    optimizedUrl={optimizedUrl}
+                    onDownload={handleDownload}
+                    isDownloading={isDownloading}
+                  />
+                  <Button
+                    variant="secondary"
+                    className="w-full"
+                    onClick={() => {
+                      setOptimized(null);
+                      // Keep the URL so the form comes back pre-filled with the same source.
+                      if (mode === 'url') setUrlAnalysis(null);
+                    }}
+                  >
+                    Optimize again
+                  </Button>
                 </div>
               </div>
             )}
+          </section>
 
-            {currentOptimized && currentAnalysis && (
-              <Comparison
-                original={currentAnalysis}
-                optimized={currentOptimized}
-                onDownload={handleDownload}
-                isDownloading={isDownloading}
-              />
-            )}
-          </div>
-
-          <aside className="lg:col-span-5 space-y-6">
-            <div className="card card-hover sticky top-24">
-              <div className="p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">How it works</h3>
-                <div className="space-y-4">
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-accent-500/20 flex items-center justify-center flex-shrink-0">
-                      <span className="text-accent-400 font-bold text-sm">01</span>
-                    </div>
-                    <div>
-                      <p className="font-medium text-white">Upload</p>
-                      <p className="text-sm text-brand-400">Drag & drop or paste a URL</p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-accent-500/20 flex items-center justify-center flex-shrink-0">
-                      <span className="text-accent-400 font-bold text-sm">02</span>
-                    </div>
-                    <div>
-                      <p className="font-medium text-white">Optimize</p>
-                      <p className="text-sm text-brand-400">Smart compression to target size</p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-accent-500/20 flex items-center justify-center flex-shrink-0">
-                      <span className="text-accent-400 font-bold text-sm">03</span>
-                    </div>
-                    <div>
-                      <p className="font-medium text-white">Download</p>
-                      <p className="text-sm text-brand-400">Get your optimized wallpaper</p>
-                    </div>
-                  </div>
+          <aside className="lg:col-span-4 space-y-6">
+            <div className="card">
+              <div className="p-6 space-y-4">
+                <h2 className="text-lg font-semibold text-white">Your plan</h2>
+                <div className="flex items-center justify-between">
+                  <span className="text-brand-400 text-sm">Plan</span>
+                  <Badge variant="accent" className="capitalize">
+                    {planLimits.plan}
+                  </Badge>
                 </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-brand-400 text-sm">Max input</span>
+                  <span className="text-white text-sm">{planLimits.max_input_mb} MB</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-brand-400 text-sm">Max output</span>
+                  <span className="text-white text-sm">{planLimits.max_output_mb} MB</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-brand-400 text-sm">Remaining today</span>
+                  <span className="text-white text-sm">
+                    {planLimits.daily_remaining < 0 ? 'Unlimited' : planLimits.daily_remaining}
+                  </span>
+                </div>
+                <p className="text-xs text-brand-500">
+                  Output formats: {formatOptions.join(', ')}
+                </p>
               </div>
             </div>
 
-            <div className="card card-hover">
-              <div className="p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">Target Size Presets</h3>
-                <div className="space-y-3">
-                  {[
-                    { label: '1 MB', desc: 'Mobile optimized', size: 1 },
-                    { label: '5 MB', desc: 'Balanced quality', size: 5 },
-                    { label: '10 MB', desc: 'High quality desktop', size: 10 },
-                  ].map(({ label, desc, size }) => (
-                    <button
-                      key={size}
-                      onClick={() => setTargetSize(size * 1024 * 1024)}
-                      className={cn(
-                        'w-full p-4 rounded-lg border text-left transition-all',
-                        targetSize === size * 1024 * 1024
-                          ? 'bg-accent-500/10 border-accent-500'
-                          : 'border-brand-700 hover:border-brand-600'
-                      )}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-semibold text-white">{label}</p>
-                          <p className="text-xs text-brand-400">{desc}</p>
-                        </div>
-                        {targetSize === size * 1024 * 1024 && (
-                          <CheckCircle className="w-5 h-5 text-accent-400" />
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <div className="card card-hover">
-              <div className="p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">Features</h3>
-                <ul className="space-y-3">
-                  {[
-                    'Exact target file size',
-                    '4K resolution support',
-                    'Smart compression algorithm',
-                    'JPG / PNG / WebP / AVIF',
-                    'URL optimization',
-                    'Fast processing',
-                    'No unnecessary quality loss',
-                  ].map((feature) => (
-                    <li key={feature} className="flex items-center gap-3 text-sm text-brand-300">
-                      <CheckCircle className="w-4 h-4 text-accent-400 flex-shrink-0" />
-                      {feature}
-                    </li>
-                  ))}
+            <div className="card">
+              <div className="p-6 space-y-3">
+                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                  <Info className="w-4 h-4 text-accent-400" />
+                  How it works
+                </h2>
+                <ul className="text-sm text-brand-400 space-y-2 list-disc pl-5">
+                  <li>Your target is a maximum, not a guarantee of exact bytes.</li>
+                  <li>Quality is searched within the target; the actual encoded size is measured.</li>
+                  <li>Transparency is preserved for PNG, WebP and AVIF.</li>
+                  <li>Images are never upscaled or stretched.</li>
+                  <li>Files are processed in memory and never stored.</li>
                 </ul>
               </div>
             </div>
           </aside>
         </div>
       </main>
-
-      <footer className="border-t border-brand-800 bg-brand-950/50 backdrop-blur-sm mt-16">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="grid md:grid-cols-4 gap-8">
-            <div>
-              <h4 className="font-semibold text-white mb-4">Wallpaper10</h4>
-              <p className="text-brand-400 text-sm">
-                Any wallpaper. Perfect size. Optimize your wallpapers to the smallest
-                possible size without sacrificing visible quality.
-              </p>
-            </div>
-            <div>
-              <h4 className="font-semibold text-white mb-4">Product</h4>
-              <ul className="space-y-2 text-sm text-brand-400">
-                <li><a href="/optimizer" className="hover:text-white transition-colors">Optimizer</a></li>
-                <li><a href="/wallpapers" className="hover:text-white transition-colors">Wallpaper Library</a></li>
-                <li><a href="/pricing" className="hover:text-white transition-colors">Pricing</a></li>
-              </ul>
-            </div>
-            <div>
-              <h4 className="font-semibold text-white mb-4">Company</h4>
-              <ul className="space-y-2 text-sm text-brand-400">
-                <li><a href="/about" className="hover:text-white transition-colors">About</a></li>
-                <li><a href="/blog" className="hover:text-white transition-colors">Blog</a></li>
-                <li><a href="/careers" className="hover:text-white transition-colors">Careers</a></li>
-              </ul>
-            </div>
-            <div>
-              <h4 className="font-semibold text-white mb-4">Legal</h4>
-              <ul className="space-y-2 text-sm text-brand-400">
-                <li><a href="/privacy" className="hover:text-white transition-colors">Privacy Policy</a></li>
-                <li><a href="/terms" className="hover:text-white transition-colors">Terms of Service</a></li>
-                <li><a href="/cookies" className="hover:text-white transition-colors">Cookie Policy</a></li>
-              </ul>
-            </div>
-          </div>
-          <div className="mt-8 pt-8 border-t border-brand-800 text-center text-sm text-brand-500">
-            © 2024 Wallpaper10. All rights reserved.
-          </div>
-        </div>
-      </footer>
     </div>
   );
 }

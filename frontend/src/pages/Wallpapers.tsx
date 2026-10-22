@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Search, Download, Eye, Loader2 } from 'lucide-react';
 import { cn } from '../utils/cn';
@@ -17,55 +17,65 @@ export function Wallpapers() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pageRef = useRef(1);
+  const requestRef = useRef(0);
+  const loadingRef = useRef(false);
 
-  const loadCategories = async () => {
+  const loadCategories = useCallback(async () => {
     try {
       const response = await wallpapersApi.categories();
       setCategories(response.data.data || []);
     } catch {
-      // Ignore
+      // Categories are optional; the library still loads without them.
     }
-  };
-
-  const loadWallpapers = async (reset = false) => {
-    if (loading) return;
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const pageNum = reset ? 1 : page;
-      const response = await wallpapersApi.list({
-        category: selectedCategory || undefined,
-        limit: 20,
-        offset: (pageNum - 1) * 20,
-      });
-      
-      const data = response.data.data || [];
-      if (reset) {
-        setWallpapers(data);
-      } else {
-        setWallpapers(prev => [...prev, ...data]);
-      }
-      setHasMore(data.length === 20);
-      setPage(pageNum + 1);
-    } catch (err) {
-      setError(handleApiError(err).message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadCategories();
-    loadWallpapers(true);
   }, []);
 
+  const loadWallpapers = useCallback(
+    async (reset = false) => {
+      // "Load more" must not double-append, but a filter change always resets.
+      if (!reset && loadingRef.current) return;
+      loadingRef.current = true;
+      const request = requestRef.current + 1;
+      requestRef.current = request;
+      setLoading(true);
+      setError(null);
+
+      try {
+        const pageNum = reset ? 1 : pageRef.current;
+        const response = await wallpapersApi.list({
+          category: selectedCategory || undefined,
+          limit: 20,
+          offset: (pageNum - 1) * 20,
+        });
+        // A newer filter change has superseded this response.
+        if (request !== requestRef.current) return;
+
+        const data = response.data.data || [];
+        setWallpapers((prev) => (reset ? data : [...prev, ...data]));
+        setHasMore(data.length === 20);
+        pageRef.current = pageNum + 1;
+      } catch (err) {
+        if (request === requestRef.current) setError(handleApiError(err).message);
+      } finally {
+        if (request === requestRef.current) {
+          loadingRef.current = false;
+          setLoading(false);
+        }
+      }
+    },
+    [selectedCategory]
+  );
+
   useEffect(() => {
-    loadWallpapers(true);
-  }, [selectedCategory, searchQuery]);
+    void loadCategories();
+  }, [loadCategories]);
+
+  useEffect(() => {
+    pageRef.current = 1;
+    void loadWallpapers(true);
+  }, [loadWallpapers]);
 
   const handleDownload = async (wallpaper: Wallpaper) => {
     try {
