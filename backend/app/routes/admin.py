@@ -37,7 +37,7 @@ def admin_analytics():
     if error:
         return error, code
     
-    days = request.args.get('days', 30, type=int)
+    days = max(1, min(request.args.get('days', 30, type=int), 365))
     daily = get_daily_stats(days)
     popular = get_popular_wallpapers(20)
     
@@ -66,8 +66,8 @@ def admin_list_users():
     if error:
         return error, code
     
-    page = request.args.get('page', 1, type=int)
-    limit = min(request.args.get('limit', 20, type=int), 100)
+    page = max(1, request.args.get('page', 1, type=int))
+    limit = max(1, min(request.args.get('limit', 20, type=int), 100))
     offset = (page - 1) * limit
     plan_filter = request.args.get('plan')
     search = request.args.get('search')
@@ -188,8 +188,8 @@ def admin_list_wallpapers():
     if error:
         return error, code
     
-    page = request.args.get('page', 1, type=int)
-    limit = min(request.args.get('limit', 20, type=int), 100)
+    page = max(1, request.args.get('page', 1, type=int))
+    limit = max(1, min(request.args.get('limit', 20, type=int), 100))
     offset = (page - 1) * limit
     published = request.args.get('published')
     category = request.args.get('category')

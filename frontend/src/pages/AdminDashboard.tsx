@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Users, Image, Download, TrendingUp, Activity, Server, Loader2, Edit, Trash2, Check, X, Plus, Search } from 'lucide-react';
 import { cn } from '../utils/cn';
@@ -36,54 +36,51 @@ export function AdminDashboard() {
   const [wallpaperFilter, setWallpaperFilter] = useState<'all' | 'published' | 'draft'>('all');
   const [error, setError] = useState<string | null>(null);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const [statsRes, analyticsRes] = await Promise.all([
         adminApi.stats(),
         adminApi.analytics(30),
       ]);
       
-      setStats(statsRes.data.data);
-      setDailyStats(analyticsRes.data.data.daily_stats || []);
-      setPopularWallpapers(analyticsRes.data.data.popular_wallpapers || []);
+      setStats(statsRes.data.data || {});
+      setDailyStats(analyticsRes.data.data?.daily_stats || []);
+      setPopularWallpapers(analyticsRes.data.data?.popular_wallpapers || []);
     } catch (err) {
       setError(handleApiError(err).message);
     }
-  };
+  }, []);
 
-  const fetchUsers = async (page = 1) => {
+  const fetchUsers = useCallback(async (page = 1) => {
     try {
       const res = await adminApi.users({ page, limit: 20, search: userSearch });
-      setUsers(res.data.data.users);
+      setUsers(res.data.data?.users || []);
     } catch (err) {
       console.error('Failed to fetch users:', err);
     }
-  };
+  }, [userSearch]);
 
-  const fetchWallpapers = async (page = 1) => {
+  const fetchWallpapers = useCallback(async (page = 1) => {
     try {
       const published = wallpaperFilter === 'published' ? 'true' : wallpaperFilter === 'draft' ? 'false' : undefined;
       const res = await adminApi.wallpapers({ page, limit: 20, published });
-      setWallpapers(res.data.data.wallpapers);
+      setWallpapers(res.data.data?.wallpapers || []);
     } catch (err) {
       console.error('Failed to fetch wallpapers:', err);
     }
-  };
+  }, [wallpaperFilter]);
 
   useEffect(() => {
-    fetchStats();
-    fetchUsers();
-    fetchWallpapers();
-    setLoading(false);
-  }, []);
+    void fetchStats().finally(() => setLoading(false));
+  }, [fetchStats]);
 
   useEffect(() => {
-    fetchUsers(userPage);
-  }, [userPage, userSearch]);
+    void fetchUsers(userPage);
+  }, [fetchUsers, userPage]);
 
   useEffect(() => {
-    fetchWallpapers(wallpaperPage);
-  }, [wallpaperPage, wallpaperFilter]);
+    void fetchWallpapers(wallpaperPage);
+  }, [fetchWallpapers, wallpaperPage]);
 
   const handleUserPlanChange = async (userId: string, plan: string) => {
     try {

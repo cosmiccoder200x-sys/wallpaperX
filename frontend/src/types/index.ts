@@ -1,74 +1,89 @@
-export type ImageFormat = 'JPEG' | 'PNG' | 'WEBP' | 'AVIF' | 'AUTO';
-
+export type ImageFormat = 'JPEG' | 'PNG' | 'WEBP' | 'AVIF';
+export type OutputFormat = ImageFormat | 'AUTO';
 export type PlanType = 'free' | 'pro' | 'admin';
 
 export interface User {
-  id: string;
-  email: string;
-  name?: string;
-  avatar_url?: string;
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL: string | null;
   plan: PlanType;
-  is_active: boolean;
+  dailyOptimizations: number;
+  credits: number;
+  createdAt: number;
+  lastLoginAt: number;
 }
 
 export interface ImageAnalysis {
   filename: string;
   format: ImageFormat;
+  mime_type: string;
   size: number;
+  size_formatted: string;
   width: number;
   height: number;
+  dimensions: string;
   aspect_ratio: string;
   megapixels: number;
   has_transparency: boolean;
   mode: string;
   estimated_optimization: {
-    recommended_format: string;
+    recommended_format: ImageFormat;
     estimated_size_mb: number;
     estimated_compression_pct: number;
     can_reach_1mb: boolean;
     can_reach_5mb: boolean;
     can_reach_10mb: boolean;
+    note?: string;
   };
 }
 
 export interface OptimizationRequest {
-  target_size: number;
-  output_format?: ImageFormat;
-  target_width?: number;
-  target_height?: number;
+  targetSizeBytes: number;
+  outputFormat: OutputFormat;
+  targetWidth?: number;
+  targetHeight?: number;
 }
 
 export interface OptimizationResult {
-  success: boolean;
+  success: true;
+  blob: Blob;
+  mimeType: string;
+  filename: string;
+  original_size: number;
+  original_width: number;
+  original_height: number;
+  original_format: ImageFormat;
   output_size: number;
   output_width: number;
   output_height: number;
   output_format: ImageFormat;
-  quality_used: number;
+  target_size: number;
+  target_met: boolean;
+  quality_used: number | null;
   processing_time_ms: number;
   compression_ratio: number;
   saved_bytes: number;
-  download_url?: string;
-  blob?: Blob;
-  error?: string;
-  error_code?: string;
+  reencoded: boolean;
+  message?: string;
 }
 
 export interface OptimizationHistoryItem {
   id: string;
   original_filename: string;
   original_size: number;
-  original_width: number;
-  original_height: number;
+  original_size_formatted: string;
+  original_dimensions: string;
   output_size: number;
-  output_width: number;
-  output_height: number;
+  output_size_formatted: string;
+  output_dimensions: string;
   output_format: ImageFormat;
   compression_ratio: number;
   saved_bytes: number;
-  quality_used: number;
+  saved_formatted: string;
+  quality_used: number | null;
   processing_time_ms: number;
-  created_at: string;
+  created_at: string | null;
 }
 
 export interface PlanLimits {
@@ -82,6 +97,7 @@ export interface PlanLimits {
   batch_processing: boolean;
   no_ads: boolean;
   history_retention_days: number;
+  supported_formats?: ImageFormat[];
 }
 
 export interface Wallpaper {
@@ -94,6 +110,7 @@ export interface Wallpaper {
   thumbnail_url: string;
   width: number;
   height: number;
+  dimensions?: string;
   aspect_ratio: string;
   resolution_label: string;
   format: ImageFormat;

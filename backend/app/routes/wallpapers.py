@@ -1,13 +1,17 @@
 import hashlib
 from flask import Blueprint, request, jsonify
+import logging
+
 from app.services.database import (
-    list_wallpapers, get_wallpaper_by_slug, get_wallpaper_by_id,
+    list_wallpapers, list_categories, get_wallpaper_by_slug, get_wallpaper_by_id,
     create_wallpaper, update_wallpaper, delete_wallpaper,
     increment_wallpaper_downloads, record_download
 )
 from app.models import Wallpaper, ImageFormat
 from app.services.auth import get_user_from_token
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 wallpapers_bp = Blueprint('wallpapers', __name__)
 
@@ -20,8 +24,8 @@ def get_client_ip_hash():
 @wallpapers_bp.route('', methods=['GET'])
 def get_wallpapers_list():
     category = request.args.get('category')
-    limit = min(request.args.get('limit', 20, type=int), 100)
-    offset = request.args.get('offset', 0, type=int)
+    limit = max(1, min(request.args.get('limit', 20, type=int), 100))
+    offset = max(0, request.args.get('offset', 0, type=int))
     published_only = request.args.get('published', 'true').lower() == 'true'
     
     wallpapers = list_wallpapers(category, limit, offset, published_only)
@@ -52,22 +56,7 @@ def get_wallpapers_list():
 
 @wallpapers_bp.route('/categories', methods=['GET'])
 def get_categories():
-    from app.services.database import execute_query
-    
-    rows = execute_query("""
-        SELECT category, COUNT(*) as count 
-        FROM wallpapers 
-        WHERE is_published = true 
-        GROUP BY category 
-        ORDER BY count DESC
-    """)
-    
-    categories = [
-        {"name": row['category'], "count": row['count'], "slug": row['category'].lower().replace(' ', '-')}
-        for row in rows
-    ]
-    
-    return jsonify({"success": True, "data": categories})
+    return jsonify({"success": True, "data": list_categories()})
 
 
 @wallpapers_bp.route('/<slug>', methods=['GET'])
@@ -122,7 +111,11 @@ def download_wallpaper(wallpaper_id):
         user = get_user_from_token(auth_header[7:])
     
     increment_wallpaper_downloads(wallpaper_uuid)
-    record_download(wallpaper_uuid, user.id if user else None, get_client_ip_hash())
+    try:
+        record_download(wallpaper_uuid, user.id if user else None, get_client_ip_hash())
+    except Exception:
+        # Download tracking must not break the actual download.
+        logger.warning("Download tracking failed for wallpaper %s", wallpaper_uuid)
     
     return jsonify({
         "success": True,
@@ -155,24 +148,33 @@ def admin_create_wallpaper():
             return jsonify({"success": False, "error": {"code": "MISSING_FIELD", "message": f"Missing required field: {field}"}}), 400
     
     try:
-        format_enum = ImageFormat(data['format'].upper())
+        format_enum = ImageFormat(str(data['format']).upper())
     except ValueError:
         return jsonify({"success": False, "error": {"code": "INVALID_FORMAT", "message": "Invalid image format"}}), 400
+
+    try:
+        width = int(data['width'])
+        height = int(data['height'])
+        file_size = int(data['file_size'])
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": {"code": "INVALID_FIELD", "message": "width, height and file_size must be integers"}}), 400
+    if width <= 0 or height <= 0 or file_size < 0:
+        return jsonify({"success": False, "error": {"code": "INVALID_FIELD", "message": "width and height must be positive"}}), 400
     
     wallpaper = Wallpaper(
-        id=UUID(data.get('id')) if data.get('id') else None,
-        title=data['title'],
+        id=None,
+        title=str(data['title'])[:255],
         slug=data['slug'],
         description=data.get('description'),
         category=data['category'],
         image_url=data['image_url'],
         thumbnail_url=data['thumbnail_url'],
-        width=data['width'],
-        height=data['height'],
+        width=width,
+        height=height,
         format=format_enum,
-        file_size=data['file_size'],
-        downloads=data.get('downloads', 0),
-        is_published=data.get('is_published', False)
+        file_size=file_size,
+        downloads=int(data.get('downloads', 0) or 0),
+        is_published=bool(data.get('is_published', False))
     )
     
     created = create_wallpaper(wallpaper)

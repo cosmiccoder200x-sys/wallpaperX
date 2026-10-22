@@ -1,91 +1,74 @@
-// Wallpaper10 Service Worker
-// Provides offline shell caching for the PWA
+// WallpaperX service worker.
+// Strategy:
+//  * navigations: network first, fall back to the cached shell when offline;
+//  * hashed build assets: cache first (safe, immutably named);
+//  * everything else (API, uploads, cross-origin): straight to the network.
+// The cache name is versioned so a deploy replaces stale assets instead of
+// serving an old app shell indefinitely.
 
-const CACHE_NAME = 'x-v1';
-const STATIC_ASSETS = [
-  '/',
-  '/optimizer',
-  '/wallpapers',
-  '/manifest.json',
-];
+const CACHE_NAME = 'wallpaperx-v2';
+const SHELL = ['/', '/index.html', '/manifest.json'];
 
-// Install event - cache static assets
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(SHELL))
+      .catch(() => undefined)
   );
   self.skipWaiting();
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames
-          .filter((name) => name !== CACHE_NAME)
-          .map((name) => caches.delete(name))
-      );
-    })
+    caches
+      .keys()
+      .then((names) => Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-// Fetch event - serve from cache, fallback to network
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-  const url = new URL(request.url);
-
-  // Skip non-GET requests
   if (request.method !== 'GET') return;
 
-  // Skip API requests - always go to network
-  if (url.pathname.startsWith('/api/')) return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/storage/')) return;
 
-  // Skip external requests
-  if (url.origin !== location.origin) return;
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match('/index.html').then((cached) => cached || caches.match('/')))
+    );
+    return;
+  }
 
-  event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Serve from cache, update in background
-        event.waitUntil(
-          fetch(request).then((networkResponse) => {
-            if (networkResponse.ok) {
-              caches.open(CACHE_NAME).then((cache) => {
-                cache.put(request, networkResponse.clone());
-              });
+  // Vite emits content-hashed filenames under /assets; cache those only.
+  if (url.pathname.startsWith('/assets/')) {
+    event.respondWith(
+      caches.match(request).then(
+        (cached) =>
+          cached ||
+          fetch(request).then((response) => {
+            if (response.ok) {
+              const copy = response.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
             }
-          }).catch(() => {})
-        );
-        return cachedResponse;
-      }
-
-      // Not in cache, fetch from network
-      return fetch(request).then((networkResponse) => {
-        // Cache successful responses
-        if (networkResponse.ok) {
-          const responseClone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(request, responseClone);
-          });
-        }
-        return networkResponse;
-      }).catch(() => {
-        // Offline fallback for navigation requests
-        if (request.mode === 'navigate') {
-          return caches.match('/');
-        }
-        // Return a generic offline response for other requests
-        return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
-      });
-    })
-  );
+            return response;
+          })
+      )
+    );
+  }
 });
 
-// Handle messages from clients
 self.addEventListener('message', (event) => {
   if (event.data === 'skipWaiting') {
     self.skipWaiting();

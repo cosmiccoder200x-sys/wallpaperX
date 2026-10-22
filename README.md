@@ -156,10 +156,10 @@ python app.py
 ```bash
 cd frontend
 pnpm dev
-# Runs on http://localhost:5173
+# Runs on http://localhost:3000 (see vite.config.ts) and proxies /api to :5000
 ```
 
-Visit `http://localhost:5173` to use the app.
+Visit `http://localhost:3000` to use the app.
 
 ## Production Deployment
 
@@ -167,8 +167,11 @@ Visit `http://localhost:5173` to use the app.
 
 ```bash
 cd backend
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+gunicorn -w 4 -b 0.0.0.0:5000 wsgi:app
 ```
+
+> Use `wsgi:app`, not `app:app`: the repository contains an `app/` package, which
+> shadows `app.py`, so `gunicorn app:app` cannot import the application.
 
 ### Frontend (Static Build)
 
@@ -204,7 +207,7 @@ WORKDIR /app
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 COPY backend/ .
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "wsgi:app"]
 
 # Frontend
 FROM node:18-alpine AS builder
@@ -315,26 +318,42 @@ MAX_PIXELS = 8_294_400  # 4K = 3840×2160
 
 ```bash
 cd backend
-pytest tests/ -v
+.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+.venv/Scripts/python.exe -m pytest tests -v
 ```
 
 Key test scenarios:
-- Valid image upload and optimization
-- Oversized file rejection
-- Malformed/corrupted image handling
-- Target size achievement (within 5%)
-- URL validation and SSRF blocking
-- Rate limiting enforcement
-- Authentication and authorization
+- Image analysis and optimization for JPEG, PNG, WebP and AVIF
+- Transparency preserved for alpha-capable output formats
+- Original already under the target, and targets that cannot be reached
+- Invalid, empty, oversized and corrupt uploads
+- Binary image responses versus structured JSON errors
+- Truthful output size, format, dimensions and filename
+- URL validation and SSRF blocking (loopback, private, metadata, redirects)
+- Rate limiting, anonymous/authenticated quotas, plan-limit configuration
+- WSGI entrypoint and production secret validation
 
 ### Frontend Tests
 
 ```bash
 cd frontend
-npm run test
-# or
-npm run test:watch
+pnpm test
+pnpm lint
+pnpm exec tsc --noEmit
 ```
+
+### End-to-End Contract Test
+
+Against a running backend (default free quota is 5/day; raise
+`FREE_DAILY_OPTIMIZATIONS` when testing locally):
+
+```bash
+python scripts/e2e_smoke.py http://127.0.0.1:5000
+```
+
+It exits non-zero and lists every failed assertion, covering the binary/JSON
+contract, measured target sizes, alpha preservation, format honouring, and SSRF
+rejection.
 
 ## Future Roadmap
 
